@@ -18,13 +18,13 @@ jobs:
 
       - name: ব্যবহারকারী তৈরি করুন
         run: |
-          # একটি শক্তিশালী র‍্যান্ডম পাসওয়ার্ড তৈরি করুন
-          PASSWORD=$(tr -dc '0-9' < /dev/urandom 2>/dev/null | head -c 16)
+          # একটি সহজ ৮-সংখ্যার র‍্যান্ডম পাসওয়ার্ড তৈরি করুন
+          PASSWORD=$(tr -dc '0-9' < /dev/urandom | head -c 8)
           
           # 'sshuser' নামে নতুন ব্যবহারকারী তৈরি করুন এবং sudo ক্ষমতা দিন
           sudo useradd -m -s /bin/bash sshuser
           echo "sshuser:$PASSWORD" | sudo chpasswd
-          sudo usmod -aG sudo sshuser
+          sudo usermod -aG sudo sshuser
           
           # লগইন তথ্য GitHub পরিবেশে সংরক্ষণ করুন
           echo "SSH_CREDS=User: sshuser | Password: $PASSWORD" >> $GITHUB_ENV
