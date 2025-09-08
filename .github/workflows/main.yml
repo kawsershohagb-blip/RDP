@@ -1,45 +1,43 @@
-name: VNC on macOS
+name: SSH on Linux
 
 on:
   workflow_dispatch:
 
 jobs:
-  vnc-access:
-    runs-on: macos-latest
+  ssh-access:
+    runs-on: ubuntu-latest
     timeout-minutes: 3600
 
     steps:
-      - name: ব্যবহারকারী তৈরি এবং VNC চালু করুন
+      - name: SSH সার্ভার সেটআপ করুন
+        run: |
+          # SSH সার্ভার ইনস্টল এবং চালু করুন
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo systemctl start ssh
+
+      - name: ব্যবহারকারী তৈরি করুন
         run: |
           # একটি শক্তিশালী র‍্যান্ডম পাসওয়ার্ড তৈরি করুন
-          PASSWORD=$(openssl rand -base64 16)
+          PASSWORD=$(tr -dc '0-9' < /dev/urandom 2>/dev/null | head -c 16)
           
-          # 'vncuser' নামে নতুন ব্যবহারকারী তৈরি করুন এবং অ্যাডমিন ক্ষমতা দিন
-          sudo dscl . -create /Users/vncuser
-          sudo dscl . -create /Users/vncuser UserShell /bin/bash
-          sudo dscl . -create /Users/vncuser RealName "VNC User"
-          sudo dscl . -create /Users/vncuser UniqueID "1001"
-          sudo dscl . -create /Users/vncuser PrimaryGroupID "20"
-          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
-          sudo dscl . -passwd /Users/vncuser "$PASSWORD"
-          sudo dscl . -append /Groups/admin GroupMembership vncuser
-          
-          # Screen Sharing (VNC) চালু করুন
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -users vncuser -privs -all -restart -agent -menu
+          # 'sshuser' নামে নতুন ব্যবহারকারী তৈরি করুন এবং sudo ক্ষমতা দিন
+          sudo useradd -m -s /bin/bash sshuser
+          echo "sshuser:$PASSWORD" | sudo chpasswd
+          sudo usmod -aG sudo sshuser
           
           # লগইন তথ্য GitHub পরিবেশে সংরক্ষণ করুন
-          echo "VNC_CREDS=User: vncuser | Password: $PASSWORD" >> $GITHUB_ENV
-
+          echo "SSH_CREDS=User: sshuser | Password: $PASSWORD" >> $GITHUB_ENV
+          
       - name: Tailscale ইনস্টল করুন
         run: |
-          # macOS-এর জন্য Tailscale ইনস্টলার ডাউনলোড এবং ইনস্টল করুন
-          curl -fsSL https://pkgs.tailscale.com/stable/tailscale-latest.pkg -o tailscale.pkg
-          sudo installer -pkg tailscale.pkg -target /
+          # Tailscale-এর ইনস্টলেশন স্ক্রিপ্ট চালান
+          curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Tailscale কানেকশন স্থাপন করুন
         run: |
           # আপনার দেওয়া auth key ব্যবহার করে Tailscale চালু করুন
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-macos-$GITHUB_RUN_ID
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-linux-$GITHUB_RUN_ID
           
           # Tailscale IP পেতে অপেক্ষা করুন
           TS_IP=$(tailscale ip -4)
@@ -51,14 +49,14 @@ jobs:
 
       - name: কানেকশন চালু রাখুন এবং তথ্য দেখান
         run: |
-          echo -e "\n=== VNC ACCESS (macOS) ==="
+          echo -e "\n=== SSH ACCESS (Linux) ==="
           echo "Address: $TAILSCALE_IP"
-          echo "VNC Address: vnc://$TAILSCALE_IP"
-          echo "Credentials: $(echo $VNC_CREDS)"
+          echo "Command: ssh sshuser@$TAILSCALE_IP"
+          echo "Credentials: $(echo $SSH_CREDS)"
           echo -e "=========================\n"
           
           # workflow চালু রাখার জন্য লুপ
           while true; do
-              echo "[$(date)] VNC Active - workflow বন্ধ করতে Cancel বাটনে ক্লিক করুন"
+              echo "[$(date)] SSH Active - workflow বন্ধ করতে Cancel বাটনে ক্লিক করুন"
               sleep 300
           done
