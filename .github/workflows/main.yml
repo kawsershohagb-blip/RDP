@@ -1,62 +1,113 @@
-name: SSH on Linux
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  ssh-access:
-    runs-on: ubuntu-latest
+  secure-rdp:
+    runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      - name: SSH সার্ভার সেটআপ করুন
+      - name: Configure Core RDP Settings
         run: |
-          # SSH সার্ভার ইনস্টল এবং চালু করুন
-          sudo apt-get update
-          sudo apt-get install -y openssh-server
-          sudo systemctl start ssh
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: ব্যবহারকারী তৈরি করুন
-        run: |
-          # একটি সহজ ৮-সংখ্যার র‍্যান্ডম পাসওয়ার্ড তৈরি করুন
-          PASSWORD=$(tr -dc '0-9' < /dev/urandom | head -c 8)
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
-          # 'sshuser' নামে নতুন ব্যবহারকারী তৈরি করুন এবং sudo ক্ষমতা দিন
-          sudo useradd -m -s /bin/bash sshuser
-          echo "sshuser:$PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo sshuser
-          
-          # লগইন তথ্য GitHub পরিবেশে সংরক্ষণ করুন
-          echo "SSH_CREDS=User: sshuser | Password: $PASSWORD" >> $GITHUB_ENV
-          
-      - name: Tailscale ইনস্টল করুন
-        run: |
-          # Tailscale-এর ইনস্টলেশন স্ক্রিপ্ট চালান
-          curl -fsSL https://tailscale.com/install.sh | sh
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-      - name: Tailscale কানেকশন স্থাপন করুন
-        run: |
-          # আপনার দেওয়া auth key ব্যবহার করে Tailscale চালু করুন
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-linux-$GITHUB_RUN_ID
-          
-          # Tailscale IP পেতে অপেক্ষা করুন
-          TS_IP=$(tailscale ip -4)
-          while [ -z "$TS_IP" ]; do
-              sleep 5
-              TS_IP=$(tailscale ip -4)
-          done
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
 
-      - name: কানেকশন চালু রাখুন এবং তথ্য দেখান
+      - name: Create RDP User with Secure Password
         run: |
-          echo -e "\n=== SSH ACCESS (Linux) ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Command: ssh sshuser@$TAILSCALE_IP"
-          echo "Credentials: $(echo $SSH_CREDS)"
-          echo -e "=========================\n"
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          # workflow চালু রাখার জন্য লুপ
-          while true; do
-              echo "[$(date)] SSH Active - workflow বন্ধ করতে Cancel বাটনে ক্লিক করুন"
-              sleep 300
-          done
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
